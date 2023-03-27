@@ -31,6 +31,8 @@ library
       crypto-api,
       mtl,
       base64,
+      http-types,
+      transformers,
       text
 
 executable shortener

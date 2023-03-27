@@ -1,39 +1,40 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use newtype instead of data" #-}
 
 module Api where
 
 import Data.Aeson
-import Control.Monad.IO.Class (MonadIO(liftIO))
 import GHC.Generics (Generic)
-import Database.Persist.Sqlite (withSqlitePool, Entity (Entity), ConnectionPool, createSqlitePool)
-import User (getSolvesForUser, getUserByUsername, Solve (Solve), setupMigrations, addTimeForUser, createUser, validateUserAndGet, createLoginToken, createLoginTokenAndGet, createLoginTokenAndGetToken, validateRawToken, User (userUsername))
+import Database.Persist.Sqlite (Entity (Entity), ConnectionPool, createSqlitePool)
+import User (getSolvesForUser, getUserByUsername, Solve (Solve), setupMigrations, addTimeForUser, createUser, validateUserAndGet, createLoginTokenAndGetToken, validateRawToken, User (userUsername))
 import Control.Monad.Logger (runStdoutLoggingT)
-import Data.Functor
-import Control.Monad.Reader (ReaderT(runReaderT), MonadReader, asks, MonadTrans (lift), guard)
+import Control.Monad.Reader (ReaderT(runReaderT))
 import Web.Scotty.Internal.Types (ScottyT, ActionT)
 
 -- *** We must use the .Trans versions to be able to move across transformers
-import Web.Scotty.Trans (scottyOptsT, scottyT, middleware, text, json, get, post, html, notFound, param, jsonData, raiseStatus)
+import Web.Scotty.Trans (scottyT, json, get, post, notFound, param, jsonData, finish, status, finish)
 -- ***
 import Web.Scotty.Cookie
 
-import Data.Text.Lazy (Text, toStrict, pack, unpack)
-import Config (ConfigM(runConfigM), Config (Config, pool))
+import Data.Text.Lazy (Text, toStrict, pack)
+import Config (ConfigM(runConfigM), Config (Config))
 import Crypto.Random (CryptoRandomGen(newGenIO))
 import Data.IORef (newIORef)
 import Control.Monad.Trans
-import Web.Scotty.Cookie (setSimpleCookie)
+import Control.Monad.Trans.Except (runExceptT, except)
 import Data.Text (unpack)
-import qualified Control.Applicative as Data.Applicative
-import qualified Data.Maybe
+import Network.HTTP.Types.Status (Status, status401, status404)
+import Data.Aeson.KeyMap (fromList, KeyMap)
+import Control.Monad.Trans.Maybe (MaybeT(runMaybeT, MaybeT))
 
 type Error = Text
 
-data TimeForm = TimeForm { tMillis :: Int } deriving ( Show, Generic )
-data UserForm = UserForm { uUsername :: String, uPassword :: String } deriving (Show, Generic)
+data TimeForm = TimeForm { millis :: Int } deriving ( Show, Generic )
+data UserForm = UserForm { username :: String, password :: String } deriving (Show, Generic)
 
 
 instance FromJSON TimeForm
@@ -61,54 +62,72 @@ api = do
     scottyT 4000 r app
 
 
-type Action = ActionT Error ConfigM ()
+type Action = ActionT Error Config.ConfigM ()
+type ActionA a = ActionT Error Config.ConfigM a
 
-application :: Config -> ScottyT Error ConfigM ()
-application c = do
-    get "/api/:username/times" $ do
-        maybeUser <- param "username" >>= lift . getUserByUsername
-        solveEntities <-
-            case maybeUser of
-                Nothing -> return []
-                Just u  -> lift $ getSolvesForUser u
-        let solves = map (\(Entity _ (Solve millis _)) -> millis) solveEntities
-        Web.Scotty.Trans.json solves
-    post "/api/create-user" $ do
+handleEither :: ActionA (Either RequestError a) -> ActionA a
+handleEither a = do
+    b <- a
+    case b of
+        Left e -> jsonSimpleError e
+        Right a -> return a
+
+data RequestError = RequestError { errorMessage :: String, statusCode :: Status }
+data JsonResponse a = JsonResponse { status :: String, payload :: KeyMap a } deriving (Show, Generic)
+instance (ToJSON a) => ToJSON (JsonResponse a)
+
+missingUserError :: RequestError
+missingUserError = RequestError "Couldn't find the user" status404
+unauthorizedUserError :: RequestError
+unauthorizedUserError = RequestError "Unauthorized" status401
+
+jsonSimpleSuccess :: [(Key, String)] -> Action
+jsonSimpleSuccess a = Web.Scotty.Trans.json $ JsonResponse "success" (fromList a)
+
+jsonSimpleError :: RequestError -> ActionA a
+jsonSimpleError a = do
+    Web.Scotty.Trans.json $ JsonResponse "error" (fromList [("error", errorMessage a)])
+    Web.Scotty.Trans.status $ statusCode a
+    finish
+
+checkAuthorized :: ActionT Error Config.ConfigM (Entity User)
+checkAuthorized = do
+    token <- maybe (jsonSimpleError unauthorizedUserError) return =<< getCookie "login_token"
+    maybeUserEntity <- lift . validateRawToken $ Data.Text.unpack token
+    maybe (jsonSimpleError unauthorizedUserError) return maybeUserEntity
+
+handleMaybe :: a -> Maybe b -> Either a b
+handleMaybe _ (Just a) = Right a
+handleMaybe a Nothing  = Left a
+
+application :: Config.Config -> ScottyT Error Config.ConfigM ()
+application _ = do
+    get "/api/:username/times" $ handleEither $ runExceptT $ do
+        u <- lift $ param @String "username"
+        user <- except . handleMaybe missingUserError =<< (lift . lift . getUserByUsername $ u)
+        solveEntities <- lift . lift . getSolvesForUser $ user
+        let solves = map (\(Entity _ (Solve m _)) -> m) solveEntities
+        lift $ Web.Scotty.Trans.json solves
+    post "/api/register" $ do
         UserForm u p <- jsonData @UserForm
-        lift $ createUser u p
-        text "ok" -- TODO this is not how you do it
+        _ <- lift $ createUser u p
+        jsonSimpleSuccess []
     post "/api/login" $ do
-        UserForm username password <- jsonData @UserForm
-        liftIO $ putStrLn "AAA"
-        maybeUserEntity <- lift $ validateUserAndGet username password
-        liftIO $ putStrLn . show $ maybeUserEntity
-        text =<< case maybeUserEntity of
-            Just u  -> do
-                token <- lift $ createLoginTokenAndGetToken u
-                -- TODO make httpOnly, see below
-                -- https://hackage.haskell.org/package/cookie-0.4.1.4/docs/Web-Cookie.html#t:SetCookie
-                setSimpleCookie "login_token" (Data.Text.Lazy.toStrict . pack $ token)
-                return "ok"
-            Nothing -> return "fail"
+        UserForm u p <- jsonData @UserForm
+        result <- runMaybeT $ do
+            userEntity <- MaybeT . lift $ validateUserAndGet u p
+            token <- lift . lift $ createLoginTokenAndGetToken userEntity
+            return (Data.Text.Lazy.toStrict . Data.Text.Lazy.pack $ token)
+        -- TODO make httpOnly, see below
+        -- https://hackage.haskell.org/package/cookie-0.4.1.4/docs/Web-Cookie.html#t:SetCookie
+        maybe (jsonSimpleError $ RequestError "Invalid login" status401) (setSimpleCookie "login_token") result
+        jsonSimpleSuccess []
     post "/api/send-time" $ do
-        maybeToken <- getCookie "login_token"
-        text =<< case maybeToken of
-            Nothing         -> return "Unauth"
-            Just cookieText -> do
-                maybeUserEntity <- lift . validateRawToken . Data.Text.unpack $ cookieText
-                case maybeUserEntity of
-                    Nothing -> return "Unauth"
-                    Just userEntity -> do
-                        timeForm <- jsonData @TimeForm
-                        lift (addTimeForUser (tMillis timeForm) userEntity) >> return "ok"
+        userEntity <- checkAuthorized
+        timeForm <- jsonData @TimeForm
+        _ <- lift (addTimeForUser (millis timeForm) userEntity)
+        jsonSimpleSuccess []
     get "/api/user/me" $ do
-        maybeToken <- getCookie "login_token"
-        text =<< case maybeToken of
-            Nothing         -> return "Unauth"
-            Just cookieText -> do
-                maybeUserEntity <- lift . validateRawToken . Data.Text.unpack $ cookieText
-                case maybeUserEntity of
-                    Nothing -> return "Unauth"
-                    Just (Entity _ user) -> return . pack . userUsername $ user
-
-    notFound $ text "HOLY FUCKING SHIT HOLY FUCK OH GOD OH NO"
+        (Entity _ user) <- checkAuthorized
+        jsonSimpleSuccess [("username", userUsername user)]
+    notFound $ jsonSimpleError $ RequestError "HOLY FUCKING SHIT HOLY FUCK OH GOD OH NO" status404

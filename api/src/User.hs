@@ -18,7 +18,7 @@ import           Database.Persist
 import           Database.Persist.Sqlite
 import           Database.Persist.TH
 import Config (ConfigM, Config (pool, gen))
-import Control.Monad.Cont (MonadIO(liftIO), guard)
+import Control.Monad.Cont (MonadIO(liftIO))
 import qualified Crypto.BCrypt as C
 import Data.ByteString.Char8
 import Data.Maybe (fromJust)
@@ -27,9 +27,7 @@ import Data.Time
 import Crypto.Random (CryptoRandomGen(genBytes))
 import Data.IORef (readIORef, writeIORef)
 import Control.Monad.RWS (asks)
-import Data.ByteString.Base64.URL (encodeBase64, encodeBase64')
-import qualified Data.ByteString as Data.Text
-import Data.Text.Lazy
+import Data.ByteString.Base64.URL (encodeBase64')
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 User
@@ -81,6 +79,8 @@ validateUserAndGet username password = do
         if validatePassword (userPassword user) password
             then Just (Entity userId user)
             else Nothing
+
+
 
 -- createUser :: User -> ... would've been fine too
 createUser :: String -> String -> ConfigM (Key User)

@@ -1,8 +1,8 @@
 <template>
-    <div>
+    <div class="modal">
         <input v-model="username" placeholder="Username">
         <input type="password" v-model="password"  placeholder="Password">
-        <button @click="register">Register</button>
+        <button @click="register" id="finish">Register</button>
     </div>
 </template>
   
@@ -17,9 +17,14 @@ export default {
         }
     },
     methods: {
-        register: function() {
-            this.$axios.$post("/api/create-user", { uUsername: this.username, uPassword: this.password });
+        register: async function() {
+            this.$axios.$post("/api/register", { username: this.username, password: this.password });
+            this.$emit("close");
         }
     }
 }
 </script>
+
+<style scoped >
+@import "styles/modal_style.css";
+</style>

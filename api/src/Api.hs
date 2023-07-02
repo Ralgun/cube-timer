@@ -97,6 +97,7 @@ checkAuthorized = do
     maybeUserEntity <- lift . validateRawToken $ Data.Text.unpack token
     maybe (jsonSimpleError unauthorizedUserError) return maybeUserEntity
 
+
 handleMaybe :: a -> Maybe b -> Either a b
 handleMaybe _ (Just a) = Right a
 handleMaybe a Nothing  = Left a
@@ -129,6 +130,12 @@ application _ = do
         _ <- lift (addTimeForUser (millis timeForm) userEntity)
         jsonSimpleSuccess []
     get "/api/user/me" $ do
-        (Entity _ user) <- checkAuthorized
-        jsonSimpleSuccess [("username", userUsername user)]
+        token <- getCookie "login_token"
+        case token of 
+            Nothing -> jsonSimpleSuccess [("username", "Not logged in")]
+            Just token -> do 
+                maybeUserEntity <- lift . validateRawToken $ Data.Text.unpack token
+                case maybeUserEntity of
+                    Nothing -> jsonSimpleSuccess [("username", "Not logged in")]
+                    Just (Entity _ u) -> jsonSimpleSuccess [("username", userUsername u)]
     notFound $ jsonSimpleError $ RequestError "HOLY FUCKING SHIT HOLY FUCK OH GOD OH NO" status404

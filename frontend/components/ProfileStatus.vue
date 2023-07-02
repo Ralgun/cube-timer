@@ -14,7 +14,7 @@ export default {
         }
     },
     async mounted() {
-        this.username = await this.$axios.$get("/api/user/me") || "";
+        this.username = (await this.$axios.$get("/api/user/me"))["payload"]["username"];
     },
 }
 </script>

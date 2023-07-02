@@ -43,7 +43,7 @@ export default {
       
       const formData= new FormData();
       formData.set("millis", this.millis);
-      this.$axios.$post("/api/send-time", { tMillis: this.millis });
+      this.$axios.$post("/api/send-time", { millis: this.millis });
     },
   },
 
